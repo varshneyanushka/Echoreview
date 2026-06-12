@@ -1,0 +1,32 @@
+# Node
+node_modules/
+server/node_modules/
+client/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Env files
+.env
+.env.*
+
+# Build files
+dist/
+build/
+
+# ML Models
+*.pt
+*.pth
+*.safetensors
+*.safetensors
+*.pt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+

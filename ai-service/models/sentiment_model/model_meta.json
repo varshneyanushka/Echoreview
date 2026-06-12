@@ -1,0 +1,17 @@
+{
+  "base_model": "distilbert-base-uncased",
+  "sentiment_labels": [
+    "Negative",
+    "Neutral",
+    "Positive"
+  ],
+  "aspect_labels": [
+    "delivery",
+    "billing",
+    "support",
+    "product",
+    "refund",
+    "general"
+  ],
+  "dropout": 0.3
+}
