@@ -1,9 +1,12 @@
 import axios from "axios";
 
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000/api";
-// Used by dashboard-only analysis/health endpoints. Reply generation itself
-// always goes through the Node API gateway.
-export const AI_BASE  = import.meta.env.VITE_AI_SERVICE_URL || "http://localhost:8000";
+export const API_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  "https://echoreview-api.onrender.com/api";
+
+export const AI_BASE =
+  import.meta.env.VITE_AI_SERVICE_URL ||
+  "https://echoreview-ai.onrender.com";
 
 const TOKEN_KEY = "echoreview_token";
 
