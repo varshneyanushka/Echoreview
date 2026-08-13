@@ -112,6 +112,31 @@ _ISSUE_KEYWORDS: Dict[str, List[str]] = {
     ],
 }
 
+# Fault signals are intentionally explicit and auditable. They catch high-risk
+# wording that a simple positive/negative score would otherwise hide.
+_FAULT_SIGNALS: Dict[str, List[str]] = {
+    "urgent": ["urgent", "immediately", "asap", "emergency", "fraud", "scam"],
+    "repeat": ["again", "second time", "third time", "repeated", "still", "every time"],
+    "service_failure": ["no response", "never replied", "cannot reach", "ignored", "unresolved"],
+    "money_risk": ["charged twice", "double charge", "unauthorised", "unauthorized", "overcharged", "refund not received"],
+    "delivery_failure": ["not arrived", "lost in transit", "never arrived", "marked delivered"],
+    "product_failure": ["unsafe", "fire", "injured", "dangerous", "stopped working", "defective"],
+}
+
+_POSITIVE_TERMS = {
+    "great": 2, "excellent": 3, "amazing": 3, "love": 2, "best": 2,
+    "wonderful": 2, "fantastic": 3, "perfect": 3, "happy": 2,
+    "satisfied": 2, "brilliant": 2, "impressed": 2, "fast": 1,
+    "smooth": 1, "easy": 1, "helpful": 2, "recommend": 2, "outstanding": 3,
+}
+_NEGATIVE_TERMS = {
+    "terrible": 3, "awful": 3, "worst": 3, "hate": 3, "horrible": 3,
+    "disappointed": 2, "bad": 1, "poor": 2, "useless": 3, "broken": 3,
+    "never": 1, "refused": 2, "ignored": 2, "defective": 3, "damaged": 2,
+    "overcharged": 3, "late": 1, "waiting": 1, "rude": 2, "unacceptable": 3,
+    "frustrated": 2, "angry": 2, "cancel": 1,
+}
+
 
 def detect_issue(text: str) -> str:
     lower = text.lower()
@@ -121,6 +146,21 @@ def detect_issue(text: str) -> str:
         if score:
             scores[issue] = score
     return max(scores, key=lambda k: scores[k]) if scores else "general"
+
+
+def detect_issues(text: str) -> List[str]:
+    """Return all relevant issue categories, ordered by keyword evidence."""
+    lower = text.lower()
+    ranked = sorted(
+        ((issue, sum(1 for word in words if word in lower)) for issue, words in _ISSUE_KEYWORDS.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return [issue for issue, score in ranked if score] or ["general"]
+
+
+def detect_faults(text: str) -> List[str]:
+    lower = text.lower()
+    return [fault for fault, phrases in _FAULT_SIGNALS.items() if any(phrase in lower for phrase in phrases)]
 
 
 def extract_specifics(text: str) -> Dict[str, Any]:
@@ -471,39 +511,28 @@ Rules:
 # ─────────────────────────────────────────────────────────────────────────────
 def _keyword_fallback(text: str) -> Dict[str, Any]:
     lower = text.lower()
-    pos = sum(
-        1
-        for w in [
-            "great", "excellent", "amazing", "love", "best", "wonderful",
-            "fantastic", "perfect", "happy", "satisfied", "brilliant", "impressed",
-            "fast", "smooth", "easy", "helpful", "recommend", "outstanding",
-        ]
-        if w in lower
-    )
-    neg = sum(
-        1
-        for w in [
-            "terrible", "awful", "worst", "hate", "horrible", "disappointed",
-            "bad", "poor", "useless", "broken", "never", "refused", "ignored",
-            "defective", "damaged", "overcharged", "late", "waiting", "rude",
-        ]
-        if w in lower
-    )
-
-    if pos > neg:
-        score, label = 75.0, "Positive"
-    elif neg > pos:
-        score, label = 22.0, "Negative"
-    else:
-        score, label = 50.0, "Neutral"
+    words = re.findall(r"[a-z']+", lower)
+    pos = sum(weight for term, weight in _POSITIVE_TERMS.items() if term in lower)
+    neg = sum(weight for term, weight in _NEGATIVE_TERMS.items() if term in lower)
+    faults = detect_faults(text)
+    # Strong negations, caps, exclamation clusters and repeat/fault reports
+    # increase severity without turning a mixed review into an arbitrary 22/75.
+    neg += sum(1 for i, word in enumerate(words[:-1]) if word in {"not", "never", "no"} and words[i + 1] in _POSITIVE_TERMS)
+    neg += min(2, lower.count("!"))
+    neg += len(faults)
+    raw = 50 + (pos - neg) * 7
+    score = round(max(3, min(97, raw)), 1)
+    label = derive_label(score)
+    confidence = round(min(0.95, 0.45 + abs(pos - neg) * 0.08 + len(faults) * 0.05) * 100, 1)
 
     return {
         "sentimentScore": score,
         "sentimentLabel": label,
-        "sentimentProbs": {},
+        "sentimentProbs": {"confidence": confidence, "positiveSignals": pos, "negativeSignals": neg},
         "aspectLabel": detect_issue(text),
-        "aspectProbs": {},
-        "modelSource": "keyword-fallback",
+        "aspectProbs": {issue: 1 for issue in detect_issues(text)},
+        "faultSignals": faults,
+        "modelSource": "weighted-lexicon-v2",
     }
 
 
@@ -614,6 +643,56 @@ def _compute_issue_stats(reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def cluster_reviews(reviews: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Cluster by multi-label issue + fault signature; no remote model required."""
+    groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for review in reviews:
+        text = review.get("text", "")
+        issues = detect_issues(text)
+        faults = detect_faults(text)
+        # Primary issue produces stable group names. The first fault adds a
+        # useful split such as "billing · money risk".
+        key = issues[0]
+        if faults:
+            key = f"{key} · {faults[0].replace('_', ' ')}"
+        groups[key].append(review)
+
+    clusters = []
+    for cluster_id, (name, items) in enumerate(sorted(groups.items(), key=lambda item: (-len(item[1]), item[0])), start=1):
+        scores = [float(item.get("sentimentScore", analyze_text(item.get("text", ""))["sentimentScore"])) for item in items]
+        fault_counts = Counter(fault for item in items for fault in detect_faults(item.get("text", "")))
+        clusters.append({
+            "clusterId": cluster_id,
+            "clusterName": name.title(),
+            "clusterSummary": f"{len(items)} reviews; average sentiment {round(sum(scores) / len(scores), 1)}.",
+            "size": len(items),
+            "avgSentiment": round(sum(scores) / len(scores), 1),
+            "faults": dict(fault_counts.most_common(3)),
+            "sampleText": items[0].get("text", ""),
+            "reviews": items[:3],
+        })
+    return clusters
+
+
+def detect_fault_patterns(reviews: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    fault_reviews: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for review in reviews:
+        for fault in detect_faults(review.get("text", "")):
+            fault_reviews[fault].append(review)
+    findings = []
+    for fault, items in fault_reviews.items():
+        avg_score = sum(float(item.get("sentimentScore", 50)) for item in items) / len(items)
+        severity = "critical" if fault in {"money_risk", "product_failure", "urgent"} or avg_score < 25 else "high"
+        findings.append({
+            "fault": fault,
+            "title": fault.replace("_", " ").title(),
+            "count": len(items),
+            "severity": severity,
+            "detail": f"Detected in {len(items)} review(s), with average sentiment {round(avg_score, 1)}.",
+        })
+    return sorted(findings, key=lambda item: ({"critical": 0, "high": 1}.get(item["severity"], 2), -item["count"]))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # KEYWORD INSIGHTS (NO ANTHROPIC IN THIS VERSION)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -675,6 +754,21 @@ def _keyword_insights(reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "priority": sev,
             })
 
+    fault_patterns = detect_fault_patterns(reviews)
+    for fault in fault_patterns:
+        insights.append({
+            "type": "fault",
+            "title": f"{fault['title']} detected",
+            "detail": fault["detail"],
+            "severity": fault["severity"],
+        })
+        recommendations.append({
+            "action": f"Investigate {fault['title'].lower()} cases and assign an owner",
+            "impact": "Reduce escalations and customer churn",
+            "priority": fault["severity"],
+            "timeframe": "immediate" if fault["severity"] == "critical" else "this week",
+        })
+
     # global risk insight
     if neg_ratio > 0.4:
         insights.append({
@@ -692,8 +786,10 @@ def _keyword_insights(reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
         "insights": insights,
         "recommendations": recommendations,
         "stats": stats,
+        "clusters": cluster_reviews(reviews),
+        "faultPatterns": fault_patterns,
         "topComplaintTheme": stats.get("topIssue"),
-        "generatedBy": "bert-ml-insights",
+        "generatedBy": "weighted-sentiment-fault-clustering-v2",
         "generatedAt": datetime.utcnow().isoformat(),
     }
 
@@ -789,18 +885,17 @@ def issues_summary(req: IssuesSummaryRequest):
     return _compute_issue_stats(req.reviews)
 @app.post("/issues/clusters")
 def issue_clusters(req: IssuesSummaryRequest):
-    # Kept for client compatibility without loading large embedding/generation models.
-    return {"success": True, "clusters": []}
+    return {"success": True, "clusters": cluster_reviews(req.reviews)}
 
 
 @app.post("/issues/map")
 def issue_map(req: IssuesSummaryRequest):
-    return {"success": True, "points": []}
+    return {"success": True, "points": cluster_reviews(req.reviews)}
 
 
 @app.get("/cluster/health")
 def cluster_health():
     return {
         "status": "ok",
-        "model": "disabled-for-lightweight-deployment"
+        "model": "weighted-lexicon + multi-signal fault clustering"
     }

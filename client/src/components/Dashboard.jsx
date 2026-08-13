@@ -928,20 +928,15 @@ export default function Dashboard({ reviews = [] }) {
             </div>
           )}
 
-          {/* ─── Claude / keyword insights ──────────────────────────────── */}
+          {/* ─── Sentiment, fault and clustering insights ──────────────── */}
           {insights && !insightsLoad && (
             <div className="space-y-4">
               {/* Header */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-sm font-bold text-white">AI Insights</span>
-                  <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full
-                    ${insights.generatedBy?.includes("anthropic")
-                      ? "bg-indigo-500/15 text-indigo-400"
-                      : "bg-slate-700 text-slate-400"}`}>
-                    {insights.generatedBy?.includes("anthropic")
-                      ? "✨ Claude NLP — reads actual review text"
-                      : "📊 Keyword analysis — add ANTHROPIC_API_KEY for deeper insights"}
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400">
+                    🧠 Weighted sentiment · fault detection · pattern clustering
                   </span>
                 </div>
                 <button onClick={refreshInsights}
@@ -961,6 +956,34 @@ export default function Dashboard({ reviews = [] }) {
                 <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4">
                   <p className="text-[10px] font-bold uppercase tracking-wider text-violet-400 mb-2">Executive Summary</p>
                   <p className="text-sm text-slate-300 leading-relaxed">{insights.executiveSummary}</p>
+                </div>
+              )}
+
+              {insights.faultPatterns?.length > 0 && (
+                <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-rose-400 mb-2">Fault signals requiring attention</p>
+                  <div className="space-y-1.5">
+                    {insights.faultPatterns.slice(0, 4).map((fault) => (
+                      <p key={fault.fault} className="text-xs text-slate-300">
+                        <span className="font-semibold text-rose-300">{fault.title}</span>
+                        {` — ${fault.detail}`}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {insights.clusters?.length > 0 && (
+                <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">Review patterns</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {insights.clusters.slice(0, 6).map((cluster) => (
+                      <div key={cluster.clusterId} className="rounded-lg bg-slate-800/70 px-3 py-2">
+                        <p className="text-xs font-semibold text-slate-200">{cluster.clusterName}</p>
+                        <p className="text-[10px] text-slate-500">{cluster.clusterSummary}</p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
