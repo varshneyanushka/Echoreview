@@ -9,6 +9,9 @@ const ReviewSchema = new mongoose.Schema(
     sentimentLabel: { type: String, enum: ["Positive", "Neutral", "Negative"], default: "Neutral" },
     platform:       { type: String, default: "Other", trim: true },
     replyText:      { type: String, default: "", trim: true },
+    // Records whether a saved reply came from an LLM, the safe fallback, or a user.
+    // This keeps the UI honest when an AI provider is unavailable.
+    replySource:    { type: String, default: "", trim: true },
     issueCategory:  { type: String, default: "general", trim: true },
     priorityScore:  { type: Number, default: 0 },
     status:         { type: String, enum: ["new", "in_progress", "resolved"], default: "new" },

@@ -47,13 +47,12 @@ const app  = express();
 const PORT = process.env.PORT || 5000;
 const DB   = process.env.MONGODB_URI || process.env.MONGO_URI
            || "mongodb://127.0.0.1:27017/echoreviewai";
+const CLIENT_ORIGINS = (process.env.CLIENT_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000")
+  .split(",").map((origin) => origin.trim()).filter(Boolean);
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: [
-    "http://localhost:5173", "http://127.0.0.1:5173",
-    "http://localhost:3000", "http://127.0.0.1:3000",
-  ],
+  origin: CLIENT_ORIGINS,
   credentials: true,
 }));
 

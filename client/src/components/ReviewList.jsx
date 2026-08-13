@@ -1,13 +1,12 @@
 /**
  * ReviewList.jsx  v5.0
- * Clean card UI. Three reply modes always visible:
- *   🤖 AI Reply  —  FLAN-T5 locally, Anthropic if key set
- *   📝 Template  —  rule-based, always works
- *   ✏️  Manual    —  blank textarea
+ * Clean card UI. Two reply modes:
+ *   🤖 AI generated — Groq → safe template fallback
+ *   ✏️ Manual — blank textarea
  */
 
 import { useState, useMemo, useRef, useEffect } from "react";
-import { saveReply, updateStatus, generateAIReply, generateTemplateReply } from "../api";
+import { saveReply, updateStatus, generateAIReply } from "../api";
 
 // ── Colour maps ───────────────────────────────────────────────────────────────
 const PLATFORM_COLOR = {
@@ -36,16 +35,14 @@ const ISSUE_COLOR = {
 
 // ── Source config ─────────────────────────────────────────────────────────────
 const SOURCE_META = {
-  "flan-t5":    { icon: "🤖", label: "Local AI",    color: "text-violet-400", bg: "bg-violet-500/10 border-violet-500/20" },
-  "anthropic":  { icon: "✨", label: "Anthropic",    color: "text-indigo-400", bg: "bg-indigo-500/10 border-indigo-500/20" },
-  "template":   { icon: "📝", label: "Template",     color: "text-amber-400",  bg: "bg-amber-500/10 border-amber-500/20" },
+  "groq":       { icon: "⚡", label: "Generated with Groq AI", color: "text-violet-400", bg: "bg-violet-500/10 border-violet-500/20" },
+  "template":   { icon: "📝", label: "Template fallback used", color: "text-amber-400", bg: "bg-amber-500/10 border-amber-500/20" },
   "manual":     { icon: "✏️", label: "Manual",       color: "text-slate-400",  bg: "bg-slate-500/10 border-slate-700" },
 };
 
 function getSourceMeta(source = "") {
   const s = source.toLowerCase();
-  if (s.includes("flan"))      return SOURCE_META["flan-t5"];
-  if (s.includes("anthropic") || s.includes("claude")) return SOURCE_META["anthropic"];
+  if (s.includes("groq")) return SOURCE_META.groq;
   if (s === "template")        return SOURCE_META["template"];
   if (s === "manual")          return SOURCE_META["manual"];
   return SOURCE_META["template"];
@@ -109,7 +106,7 @@ function ModeTab({ active, onClick, icon, label, disabled }) {
 // ── Review card ───────────────────────────────────────────────────────────────
 function ReviewCard({ review, onUpdate }) {
   const [open, setOpen]           = useState(false);
-  const [mode, setMode]           = useState("ai");   // "ai" | "template" | "manual"
+  const [mode, setMode]           = useState("ai");   // "ai" | "manual"
   const [draft, setDraft]         = useState("");
   const [genSource, setGenSource] = useState("");
   const [loading, setLoading]     = useState(false);
@@ -134,15 +131,6 @@ function ReviewCard({ review, onUpdate }) {
   const reviewText = review.text || "";
   const preview    = reviewText.length > 160 ? reviewText.slice(0, 160) + "…" : reviewText;
 
-  const payload = {
-    customerName:   review.customerName,
-    text:           review.text,
-    rating:         review.rating,
-    platform:       review.platform,
-    sentimentScore: review.sentimentScore,
-    sentimentLabel: review.sentimentLabel,
-  };
-
   // ── Generate reply ──────────────────────────────────────────────────────────
   async function generate(newMode) {
     setMode(newMode);
@@ -154,15 +142,15 @@ function ReviewCard({ review, onUpdate }) {
       return;
     }
     setLoading(true);
+    setGenSource("generating-groq");
+    setOpen(true);
     try {
-      const result = newMode === "template"
-        ? await generateTemplateReply(payload)
-        : await generateAIReply(payload);
+      const result = await generateAIReply(review._id);
       setDraft(result.reply || "");
-      setGenSource(result.source || (newMode === "template" ? "template" : "flan-t5"));
+      setGenSource(result.source || "template");
       setOpen(true);
     } catch {
-      setErr("Could not generate reply — try Template or write manually.");
+      setErr("The reply service did not respond. Please try again or write a manual reply.");
       setDraft("");
       setGenSource("manual");
       setOpen(true);
@@ -176,7 +164,7 @@ function ReviewCard({ review, onUpdate }) {
     if (!draft.trim()) { setErr("Reply cannot be empty."); return; }
     setSaving(true); setErr("");
     try {
-      const updated = await saveReply(review._id, draft.trim(), review.issueCategory);
+      const updated = await saveReply(review._id, draft.trim(), review.issueCategory, genSource || "manual");
       onUpdate(updated);
       setOpen(false);
     } catch {
@@ -234,7 +222,14 @@ function ReviewCard({ review, onUpdate }) {
             {hasReply && !open && (
               <div className="mt-2 flex items-start gap-2 rounded-lg bg-emerald-500/5 border border-emerald-500/15 px-3 py-2">
                 <span className="text-emerald-500 text-xs mt-0.5">↩</span>
-                <p className="text-xs text-slate-300 line-clamp-2">{review.replyText}</p>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-slate-300 line-clamp-2">{review.replyText}</p>
+                  {review.replySource && (
+                    <span className={`mt-1 inline-block text-[10px] font-semibold ${getSourceMeta(review.replySource).color}`}>
+                      {getSourceMeta(review.replySource).icon} {getSourceMeta(review.replySource).label}
+                    </span>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -260,15 +255,8 @@ function ReviewCard({ review, onUpdate }) {
             <button onClick={() => generate("ai")} disabled={loading}
               className="flex items-center gap-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:opacity-50">
               {loading && mode === "ai"
-                ? <><span className="h-3 w-3 border border-white/30 border-t-white rounded-full animate-spin"/>Generating…</>
-                : <>🤖 {hasReply ? "Re-generate" : "AI Reply"}</>}
-            </button>
-
-            <button onClick={() => generate("template")} disabled={loading}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-700 hover:border-slate-600 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 transition-colors disabled:opacity-50">
-              {loading && mode === "template"
-                ? <><span className="h-3 w-3 border border-slate-400/30 border-t-slate-300 rounded-full animate-spin"/>Loading…</>
-                : <>📝 Template</>}
+                ? <><span className="h-3 w-3 border border-white/30 border-t-white rounded-full animate-spin"/>Generating with Groq…</>
+                : <>🤖 {hasReply ? "Re-generate AI" : "AI generated"}</>}
             </button>
 
             <button onClick={() => generate("manual")}
@@ -302,13 +290,20 @@ function ReviewCard({ review, onUpdate }) {
           <div className="mt-4 space-y-3">
             {/* Mode switcher */}
             <div className="flex gap-1 bg-slate-800/50 rounded-lg p-1 w-fit">
-              <ModeTab active={mode==="ai"}       onClick={() => generate("ai")}       icon="🤖" label="AI Reply" disabled={loading} />
-              <ModeTab active={mode==="template"} onClick={() => generate("template")} icon="📝" label="Template" disabled={loading} />
+              <ModeTab active={mode==="ai"}       onClick={() => generate("ai")}       icon="🤖" label="AI generated" disabled={loading} />
               <ModeTab active={mode==="manual"}   onClick={() => generate("manual")}   icon="✏️" label="Manual"   disabled={loading} />
             </div>
 
             {/* Source info strip */}
-            {genSource && mode !== "manual" && (
+            {loading && mode === "ai" && (
+              <div className="flex items-center gap-2 rounded-lg border border-violet-500/20 bg-violet-500/10 px-3 py-2">
+                <span className="h-3 w-3 border border-violet-300/30 border-t-violet-300 rounded-full animate-spin" />
+                <span className="text-xs font-semibold text-violet-300">Generating with Groq AI…</span>
+                <span className="text-xs text-slate-500">— template fallback will be used if it times out</span>
+              </div>
+            )}
+
+            {genSource && !loading && mode !== "manual" && (
               <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${srcMeta.bg}`}>
                 <span className="text-sm">{srcMeta.icon}</span>
                 <span className={`text-xs font-semibold ${srcMeta.color}`}>{srcMeta.label}</span>

@@ -1,17 +1,23 @@
 """
-main.py  –  EchoReview AI Service  v5.0
+main.py  –  EchoReview AI Service  v4.4
 ──────────────────────────────────────────────────────────────────────────────
-Groq + Template version. Lightweight and free-tier friendly.
+Gemini + Groq + Template version.  100% free to run — no billing required.
 
-Reply chain: Groq → Template (always works, zero API calls).
+Reply chain (in order of preference):
+  1. Gemini  — Google AI Studio free tier (get key at aistudio.google.com)
+  2. Groq    — Llama free tier (get key at console.groq.com)
+  3. Template — always works, zero API calls
 
 What this file does:
-  • Uses lightweight keyword sentiment analysis (no model downloads at startup).
-  • Generates replies with Groq → Template (automatic fallback chain).
+  • Sentiment analysis using your custom local sentiment model if available.
+  • Falls back to Hugging Face sentiment model if custom model is missing.
+  • Generates replies with Gemini → Groq → Template (automatic fallback chain).
   • Provides lightweight keyword-based insights.
 
 Environment variables (all free, no billing needed):
+  GEMINI_API_KEY  — from aistudio.google.com/apikey   (1 500 req/day free)
   GROQ_API_KEY    — from console.groq.com/keys         (14 400 req/day free)
+  GEMINI_MODEL    — default: gemini-2.0-flash
   GROQ_MODEL      — default: llama-3.3-70b-versatile
 """
 
@@ -24,32 +30,75 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 load_dotenv()
+import ssl
+import certifi
+import httpx
+import torch
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SSL FIX  (must run BEFORE `from google import genai`)
+# Fixes "certificate verify failed: unable to get local issuer certificate"
+# on macOS (Python.org installer) and some Linux environments.
+#
+# Root cause: httpx (used internally by google-genai SDK) calls
+# ssl.create_default_context() which reads the system CA store — often
+# incomplete on macOS Python.org installs.
+# Fix: monkey-patch httpx.Client / AsyncClient so every instance defaults
+# to certifi's up-to-date CA bundle, without touching HttpOptions at all.
+# ─────────────────────────────────────────────────────────────────────────────
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
+_orig_client_init       = httpx.Client.__init__
+_orig_async_client_init = httpx.AsyncClient.__init__
+
+def _patched_client_init(self, *args, **kwargs):
+    kwargs.setdefault("verify", certifi.where())
+    _orig_client_init(self, *args, **kwargs)
+
+def _patched_async_client_init(self, *args, **kwargs):
+    kwargs.setdefault("verify", certifi.where())
+    _orig_async_client_init(self, *args, **kwargs)
+
+httpx.Client.__init__      = _patched_client_init
+httpx.AsyncClient.__init__ = _patched_async_client_init
+# ─────────────────────────────────────────────────────────────────────────────
+
+from google import genai
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
-# Groq — obtain a key from console.groq.com/keys
+# Gemini — free tier via Google AI Studio (aistudio.google.com/apikey)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL",   "gemini-2.0-flash")
+
+# Groq — free tier, no billing ever (console.groq.com/keys)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL   = os.getenv("GROQ_MODEL",   "llama-3.3-70b-versatile")
-GROQ_TIMEOUT_SECONDS = float(os.getenv("GROQ_TIMEOUT_SECONDS", "6"))
 
-ALLOWED_ORIGINS = [
-    origin.strip() for origin in os.getenv("CLIENT_ORIGINS", "http://localhost:5173").split(",")
-    if origin.strip()
-]
+CUSTOM_MODEL_DIR = os.getenv("CUSTOM_MODEL_DIR", "models/sentiment_model")
+HF_FALLBACK_MODEL = os.getenv(
+    "SENTIMENT_MODEL",
+    "nlptown/bert-base-multilingual-uncased-sentiment",
+)
 
-app = FastAPI(title="EchoReview AI Service", version="5.0.0")
+app = FastAPI(title="EchoReview AI Service", version="4.3.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+_custom_predictor = None
+_hf_pipeline = None
+_hf_model_name = ""
+_gemini_client = None
 _groq_client   = None
 _reply_engine = "template"
 
@@ -397,6 +446,67 @@ def _template_reply(payload: Dict[str, Any]) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GEMINI REPLY
+# ─────────────────────────────────────────────────────────────────────────────
+def _run_gemini_reply(payload: Dict[str, Any]) -> Optional[str]:
+    if _gemini_client is None:
+        return None
+
+    name = _first_name(payload.get("customerName", "Customer"))
+    review = (payload.get("text") or "").strip()
+    platform = (payload.get("platform") or "our platform").strip()
+    issue = detect_issue(review)
+    sentiment = (payload.get("sentimentLabel") or derive_label(_rating_num(payload.get("rating")) * 20)).strip()
+    specifics = extract_specifics(review)
+
+    spec_lines = []
+    if specifics.get("reference"):
+        spec_lines.append(f"Reference: {specifics['reference']}")
+    if specifics.get("duration"):
+        spec_lines.append(f"Duration: {specifics['duration']}")
+    if specifics.get("amount"):
+        spec_lines.append(f"Amount: {specifics['amount']}")
+    spec_block = "\n".join(spec_lines) if spec_lines else "None"
+
+    prompt = f"""
+You are writing a reply on behalf of a company.
+
+Customer name: {name}
+Platform: {platform}
+Issue category: {issue}
+Sentiment: {sentiment}
+Extracted details: {spec_block}
+
+Customer review:
+{review}
+
+Write a short, natural customer support reply.
+Rules:
+- Start with exactly: Hi {name},
+- Be polite, professional, and human.
+- Acknowledge the concern or praise.
+- If negative, apologise briefly and mention the team will look into it.
+- If positive, thank the customer warmly.
+- Do NOT say you already refunded, replaced, cancelled, shipped, or fixed anything unless the review explicitly says so.
+- Do NOT repeat the review.
+- Keep it to 2 to 4 sentences.
+- Output only the reply.
+""".strip()
+
+    try:
+        response = _gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+        )
+        if not getattr(response, "text", None):
+            return None
+        return cleanup_reply(response.text)
+    except Exception as exc:
+        print(f"[Gemini] Reply error: {exc}")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GROQ REPLY  (free-tier fallback — llama-3.3-70b-versatile)
 # ─────────────────────────────────────────────────────────────────────────────
 def _run_groq_reply(payload: Dict[str, Any]) -> Optional[str]:
@@ -449,9 +559,8 @@ Rules:
         response = _groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=180,
+            max_tokens=300,
             temperature=0.4,
-            timeout=GROQ_TIMEOUT_SECONDS,
         )
 
         raw = response.choices[0].message.content or ""
@@ -465,10 +574,69 @@ Rules:
     except Exception as exc:
         print(f"[Groq] Reply error: {exc}")
         return None
-    
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SENTIMENT CASCADE
 # ─────────────────────────────────────────────────────────────────────────────
+def _run_custom_model(text: str) -> Optional[Dict[str, Any]]:
+    if _custom_predictor is None:
+        return None
+
+    r = _custom_predictor.predict(text)
+    return {
+        "sentimentScore": r.sentiment_score,
+        "sentimentLabel": r.sentiment_label,
+        "sentimentProbs": r.sentiment_probs,
+        "aspectLabel": r.aspect_label,
+        "aspectProbs": r.aspect_probs,
+        "modelSource": "custom-distilbert",
+    }
+
+
+def _run_nlptown(text: str) -> Optional[Dict[str, Any]]:
+    if _hf_pipeline is None or "nlptown" not in _hf_model_name:
+        return None
+
+    result = _hf_pipeline(text[:512], truncation=True)[0]
+    stars = int(result["label"][0])
+    conf = float(result["score"])
+
+    if stars <= 2:
+        label, score = "Negative", round((stars / 2) * 40 * conf, 2)
+    elif stars == 3:
+        label, score = "Neutral", round(40 + 20 * conf, 2)
+    else:
+        label, score = "Positive", round(60 + ((stars - 3) / 2) * 40 * conf, 2)
+
+    return {
+        "sentimentScore": min(100, max(0, score)),
+        "sentimentLabel": label,
+        "sentimentProbs": {label: round(conf * 100, 2)},
+        "aspectLabel": detect_issue(text),
+        "aspectProbs": {},
+        "modelSource": "nlptown-5star",
+    }
+
+
+def _run_distilbert_binary(text: str) -> Optional[Dict[str, Any]]:
+    if _hf_pipeline is None:
+        return None
+
+    result = _hf_pipeline(text[:512], truncation=True)[0]
+    raw = result["label"].upper()
+    sc = float(result["score"])
+    score = round(min(sc * 100, 100), 2) if raw == "POSITIVE" else round(min((1 - sc) * 100, 100), 2)
+
+    return {
+        "sentimentScore": score,
+        "sentimentLabel": derive_label(score),
+        "sentimentProbs": {},
+        "aspectLabel": detect_issue(text),
+        "aspectProbs": {},
+        "modelSource": "distilbert-binary",
+    }
+
+
 def _keyword_fallback(text: str) -> Dict[str, Any]:
     lower = text.lower()
     pos = sum(
@@ -508,10 +676,11 @@ def _keyword_fallback(text: str) -> Dict[str, Any]:
 
 
 def analyze_text(text: str) -> Dict[str, Any]:
-    return _keyword_fallback(text)
+    return (_run_custom_model(text) or _run_nlptown(text) or _run_distilbert_binary(text) or _keyword_fallback(text))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REPLY GENERATOR  —  chain: Groq → Template
+# REPLY GENERATOR  —  chain: Gemini → Groq → Template
 # ─────────────────────────────────────────────────────────────────────────────
 def generate_reply(payload: Dict[str, Any], force_template: bool = False) -> Dict[str, Any]:
     issue = detect_issue(payload.get("text", ""))
@@ -520,7 +689,21 @@ def generate_reply(payload: Dict[str, Any], force_template: bool = False) -> Dic
     source = "template"
 
     if not force_template:
-        # 1) Groq
+        # 1) Gemini
+        if _gemini_client is not None:
+            try:
+                print("[Reply] Trying Gemini...")
+                r = _run_gemini_reply(payload)
+                if r and not _is_bad_reply(r, payload.get("text", ""), label="Gemini"):
+                    reply = r
+                    source = f"gemini/{GEMINI_MODEL}"
+                    print(f"[Reply] Gemini accepted: {reply[:120]!r}")
+                else:
+                    print("[Reply] Gemini rejected")
+            except Exception as exc:
+                print(f"[Reply] Gemini failed: {exc}")
+
+        # 2) Groq
         if not reply and _groq_client is not None:
             try:
                 print("[Reply] Trying Groq...")
@@ -534,7 +717,7 @@ def generate_reply(payload: Dict[str, Any], force_template: bool = False) -> Dic
             except Exception as exc:
                 print(f"[Reply] Groq failed: {exc}")
 
-    # 2) Template
+    # 3) Template
     if not reply:
         reply = _template_reply(payload)
         source = "template"
@@ -622,95 +805,158 @@ def _keyword_insights(reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
     breakdown = stats.get("issueBreakdown", {})
     total = stats.get("totalReviews", 1)
 
-    sentiment_scores = [r.get("sentimentScore", 50) for r in reviews]
-    avg_sentiment = sum(sentiment_scores) / max(len(sentiment_scores), 1)
-
-    neg_reviews = [r for r in reviews if r.get("sentimentLabel") == "Negative"]
-    neg_ratio = len(neg_reviews) / max(total, 1)
-
-    # trending detection (simple delta-based ML logic)
-    trending_issues = []
-    for issue, data in breakdown.items():
-        if data.get("trending"):
-            trending_issues.append(issue)
-
-    # severity scoring (ML-style weighted function)
-    def severity(score, count, trend):
-        base = (100 - score) * 0.6 + count * 2
-        if trend:
-            base *= 1.3
-        if base > 70:
-            return "critical"
-        elif base > 50:
-            return "high"
-        elif base > 30:
-            return "medium"
-        return "low"
+    neg_count = sum(1 for r in reviews if r.get("sentimentLabel") == "Negative")
+    unresolved = sum(1 for r in reviews if r.get("status") == "new")
+    neg_pct = round(neg_count / max(total, 1) * 100, 1)
 
     insights = []
     recommendations = []
 
-    for issue, data in breakdown.items():
-        sev = severity(
-            data["avgSentiment"],
-            data["count"],
-            data.get("trending", False),
-        )
-
+    if breakdown:
+        top_issue, top_data = max(breakdown.items(), key=lambda x: x[1]["count"])
         insights.append({
-            "type": "issue",
-            "title": f"{issue.capitalize()} issue pattern detected",
+            "type": "theme",
+            "title": f"{top_issue.capitalize()} is your top complaint area",
             "detail": (
-                f"{data['count']} occurrences, "
-                f"avg sentiment {data['avgSentiment']}, "
-                f"{'trending upward' if data.get('trending') else 'stable'}"
+                f"{top_data['count']} reviews ({top_data['percentage']}%) mention {top_issue} issues. "
+                f"Average rating for this issue is {top_data['avgRating']:.1f}★ and average sentiment is {top_data['avgSentiment']}%. "
+                f"Severity is classified as {top_data['severity']}."
             ),
-            "severity": sev,
+            "severity": top_data["severity"],
+            "affectedCount": top_data["count"],
+        })
+        recommendations.append({
+            "action": f"Prioritise fixing {top_issue} — it affects {top_data['percentage']}% of your reviews",
+            "impact": "Reduce negative review rate and improve average rating",
+            "timeframe": "this week",
+            "priority": top_data["severity"],
         })
 
-        if sev in ["high", "critical"]:
-            recommendations.append({
-                "action": f"Fix {issue} pipeline urgently",
-                "impact": "Reduce negative sentiment & improve rating",
-                "priority": sev,
-            })
-
-    # global risk insight
-    if neg_ratio > 0.4:
+    trending = [k for k, v in breakdown.items() if v.get("trending")]
+    if trending:
         insights.append({
-            "type": "risk",
-            "title": "High negative sentiment cluster detected",
-            "detail": f"{round(neg_ratio*100,1)}% reviews are negative",
-            "severity": "critical",
+            "type": "operational",
+            "title": f"Rising issues: {', '.join(t.capitalize() for t in trending)}",
+            "detail": (
+                "These issue categories have increased in the last 7 days, suggesting a possible "
+                "operational change or external event is affecting customer experience."
+            ),
+            "severity": "high",
+            "affectedCount": sum(breakdown[t]["recentCount"] for t in trending),
         })
+
+    if neg_pct > 40:
+        insights.append({
+            "type": "urgent",
+            "title": f"{neg_pct:.0f}% of reviews are negative — above safe threshold",
+            "detail": (
+                "A negative review rate above 40% significantly impacts platform rankings and brand perception. "
+                "Immediate intervention on top issues is recommended."
+            ),
+            "severity": "critical" if neg_pct > 60 else "high",
+            "affectedCount": neg_count,
+        })
+        recommendations.append({
+            "action": "Set up automated alerts for 1-2 star reviews and respond within 24 hours",
+            "impact": "Reduce escalation and show responsiveness to potential customers reading reviews",
+            "timeframe": "immediate",
+            "priority": "critical",
+        })
+
+    if unresolved > 10:
+        insights.append({
+            "type": "urgent",
+            "title": f"{unresolved} reviews still awaiting a reply",
+            "detail": (
+                "A large backlog of unanswered reviews signals poor responsiveness to new customers "
+                "and may affect your platform ranking."
+            ),
+            "severity": "high" if unresolved > 20 else "medium",
+            "affectedCount": unresolved,
+        })
+        recommendations.append({
+            "action": f"Use AI Reply to clear the {unresolved}-review backlog",
+            "impact": "Improve response rate metric and customer trust",
+            "timeframe": "this week",
+            "priority": "high",
+        })
+
+    top_issue_name = (breakdown and max(breakdown.items(), key=lambda x: x[1]["count"])[0]) or "general"
 
     return {
         "executiveSummary": (
-            f"Dataset shows avg sentiment {round(avg_sentiment,1)} with "
-            f"{round(neg_ratio*100,1)}% negative reviews."
+            f"Analysis of {total} reviews shows {neg_pct}% negative sentiment. "
+            f"The top issue is {top_issue_name} ({breakdown.get(top_issue_name, {}).get('percentage', 0)}% of reviews). "
+            f"{unresolved} reviews are still awaiting a reply."
         ),
         "insights": insights,
         "recommendations": recommendations,
         "stats": stats,
-        "topComplaintTheme": stats.get("topIssue"),
-        "generatedBy": "bert-ml-insights",
+        "churnRiskCount": 0,
+        "urgentReplyCount": unresolved,
+        "topComplaintTheme": top_issue_name,
+        "generatedBy": "keyword-analysis",
         "generatedAt": datetime.utcnow().isoformat(),
     }
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STARTUP
 # ─────────────────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 def load_everything():
-    global _groq_client, _reply_engine
-    print("\n[EchoReview AI] v5.0 starting…")
+    global _custom_predictor, _hf_pipeline, _hf_model_name, _gemini_client, _groq_client, _reply_engine
 
-    # Groq client
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\n[EchoReview AI] v4.4 starting on {device}…")
+
+    # 1) Custom sentiment model
+    try:
+        from sentiment_model import SentimentPredictor
+        _custom_predictor = SentimentPredictor.from_directory(CUSTOM_MODEL_DIR, device)
+        print("[EchoReview AI] ✓ Custom sentiment model loaded")
+    except FileNotFoundError:
+        print("[EchoReview AI] ℹ Custom model not found — using HF fallback")
+        _custom_predictor = None
+    except Exception as exc:
+        print(f"[EchoReview AI] ✗ Custom model error: {exc}")
+        _custom_predictor = None
+
+    # 2) Hugging Face fallback sentiment model
+    if _custom_predictor is None:
+        try:
+            from transformers import pipeline as hf_pipeline
+            _hf_pipeline = hf_pipeline(
+                "text-classification",
+                model=HF_FALLBACK_MODEL,
+                device=0 if torch.cuda.is_available() else -1,
+            )
+            _hf_model_name = HF_FALLBACK_MODEL
+            print(f"[EchoReview AI] ✓ HF sentiment fallback: {HF_FALLBACK_MODEL}")
+        except Exception as exc:
+            print(f"[EchoReview AI] ✗ HF fallback failed: {exc}")
+            _hf_pipeline = None
+            _hf_model_name = ""
+
+    # 3) Gemini client — httpx already patched above to use certifi
+    if GEMINI_API_KEY:
+        try:
+            _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+            _reply_engine  = f"gemini/{GEMINI_MODEL}"
+            print(f"[EchoReview AI] ✓ Gemini ready ({GEMINI_MODEL})")
+        except Exception as exc:
+            _gemini_client = None
+            print(f"[EchoReview AI] ✗ Gemini init failed: {exc}")
+    else:
+        _gemini_client = None
+        print("[EchoReview AI] ℹ GEMINI_API_KEY not set — skipping Gemini")
+
+    # 4) Groq client — free tier, no billing needed (console.groq.com)
     if GROQ_API_KEY:
         try:
             from groq import Groq
-            _groq_client  = Groq(api_key=GROQ_API_KEY, timeout=GROQ_TIMEOUT_SECONDS, max_retries=0)
-            _reply_engine = f"groq/{GROQ_MODEL}"
+            _groq_client  = Groq(api_key=GROQ_API_KEY)
+            _reply_engine = _reply_engine if _gemini_client else f"groq/{GROQ_MODEL}"
             print(f"[EchoReview AI] ✓ Groq ready ({GROQ_MODEL})")
         except Exception as exc:
             _groq_client = None
@@ -720,11 +966,12 @@ def load_everything():
         print("[EchoReview AI] ℹ GROQ_API_KEY not set — skipping Groq")
 
     # Determine active reply engine label for logs
-    if not _groq_client:
+    if not _gemini_client and not _groq_client:
         _reply_engine = "template"
 
-    print("[EchoReview AI] Sentiment : keyword-analysis")
-    print(f"[EchoReview AI] Reply     : {_reply_engine}  (chain: Groq → Template)")
+    sentiment_engine = "custom-distilbert" if _custom_predictor else _hf_model_name or "keyword"
+    print(f"\n[EchoReview AI] Sentiment : {sentiment_engine}")
+    print(f"[EchoReview AI] Reply     : {_reply_engine}  (chain: Gemini → Groq → Template)")
     print("[EchoReview AI] Insights  : keyword-analysis")
     print("[EchoReview AI] Ready.\n")
 
@@ -737,9 +984,13 @@ def health():
     return {
         "ok": True,
         "service": "EchoReview AI Service",
-        "version": "5.0.0",
-        "sentimentEngine": "keyword-analysis",
+        "version": "4.4.0",
+        "sentimentEngine": (
+            "custom-distilbert" if _custom_predictor
+            else _hf_model_name if _hf_pipeline else "keyword-fallback"
+        ),
         "replyEngine":      _reply_engine,
+        "geminiEnabled":    _gemini_client is not None,
         "groqEnabled":      _groq_client   is not None,
         "anthropicEnabled": False,
         "insightsEngine":   "keyword-analysis",
@@ -783,24 +1034,6 @@ def get_insights(req: InsightsRequest):
     return _keyword_insights(req.reviews)
 
 
-
 @app.post("/issues/summary")
 def issues_summary(req: IssuesSummaryRequest):
     return _compute_issue_stats(req.reviews)
-@app.post("/issues/clusters")
-def issue_clusters(req: IssuesSummaryRequest):
-    # Kept for client compatibility without loading large embedding/generation models.
-    return {"success": True, "clusters": []}
-
-
-@app.post("/issues/map")
-def issue_map(req: IssuesSummaryRequest):
-    return {"success": True, "points": []}
-
-
-@app.get("/cluster/health")
-def cluster_health():
-    return {
-        "status": "ok",
-        "model": "disabled-for-lightweight-deployment"
-    }

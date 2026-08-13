@@ -12,6 +12,9 @@ venv/
 .env
 .env.*
 
+# Local credential test scripts
+nanotest.py
+
 # Build files
 dist/
 build/
@@ -29,4 +32,3 @@ Thumbs.db
 
 # Logs
 *.log
-

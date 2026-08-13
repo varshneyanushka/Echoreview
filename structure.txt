@@ -1,52 +1,52 @@
 .
+├── README.md
 ├── ai-service
-│   ├── main.py
-│   ├── models
-│   │   ├── flan_reply
-│   │   │   ├── config.json
-│   │   │   ├── generation_config.json
-│   │   │   ├── model.safetensors
-│   │   │   ├── tokenizer.json
-│   │   │   └── tokenizer_config.json
-│   │   └── sentiment_model
-│   │       ├── model_meta.json
-│   │       └── model_weights.pt
-│   ├── requirements.txt
-│   ├── sentiment_model.py
-│   ├── train.py
-│   └── train_reply.py
+│   ├── main.py
+│   ├── main_groq.py
+│   ├── ml_clusters.py
+│   ├── models
+│   │   └── sentiment_model
+│   │       └── model_meta.json
+│   ├── requirements.txt
+│   ├── sentiment_model.py
+│   ├── train.py
+│   └── train_reply.py
 ├── client
-│   ├── index.html
-│   ├── package-lock.json
-│   ├── package.json
-│   ├── postcss.config.js
-│   ├── src
-│   │   ├── App.jsx
-│   │   ├── api.js
-│   │   ├── components
-│   │   │   ├── Dashboard.jsx
-│   │   │   ├── Login.jsx
-│   │   │   └── ReviewList.jsx
-│   │   ├── index.css
-│   │   └── main.jsx
-│   ├── tailwind.config.js
-│   └── vite.config.js
+│   ├── index.html
+│   ├── package-lock.json
+│   ├── package.json
+│   ├── postcss.config.js
+│   ├── src
+│   │   ├── App.jsx
+│   │   ├── api.js
+│   │   ├── components
+│   │   │   ├── Dashboard.jsx
+│   │   │   ├── Login.jsx
+│   │   │   └── ReviewList.jsx
+│   │   ├── index.css
+│   │   └── main.jsx
+│   ├── tailwind.config.js
+│   └── vite.config.js
+├── nanotest.py
 ├── seed
-│   └── generateMockData.js
-└── server
-    ├── app.js
-    ├── middleware
-    │   └── auth.js
-    ├── models
-    │   ├── Review.js
-    │   └── User.js
-    ├── package-lock.json
-    ├── package.json
-    ├── routes
-    │   ├── analytics.js
-    │   ├── auth.js
-    │   └── reviews.js
-    └── workers
-        └── analyticsWorker.js
+│   └── generateMockData.js
+├── server
+│   ├── app.js
+│   ├── middleware
+│   │   └── auth.js
+│   ├── models
+│   │   ├── Review.js
+│   │   └── User.js
+│   ├── package-lock.json
+│   ├── package.json
+│   ├── routes
+│   │   ├── analytics.js
+│   │   ├── auth.js
+│   │   └── reviews.js
+│   └── workers
+│       └── analyticsWorker.js
+└── structure.txt
 
-14 directories, 36 files
+13 directories, 35 files
+
+tree -I "node_modules|server/node_modules|client/node_modules|__pycache__|venv|dist|build|*.pt|*.pth|*.safetensors|.env*"
