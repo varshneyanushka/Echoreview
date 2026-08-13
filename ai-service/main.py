@@ -42,9 +42,16 @@ ALLOWED_ORIGINS = [
 ]
 
 app = FastAPI(title="EchoReview AI Service", version="5.0.0")
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=[
+        "https://echoreview.anushka-pkg.workers.dev",
+        "https://echoreview.pages.dev",
+        "http://localhost:5173",
+        "http://localhost:4173",
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
