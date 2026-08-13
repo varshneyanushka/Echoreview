@@ -95,15 +95,25 @@ async function bootstrap() {
 
   // Seed default admin if no users exist
   const User = require("./models/User");
-  const count = await User.countDocuments();
-  if (count === 0) {
+
+  const adminEmail = "admin@echoreview.ai";
+
+  const existingAdmin = await User.findOne({
+    email: adminEmail,
+  }).select("+password +active");
+
+  if (!existingAdmin) {
     await User.create({
-      name:     "Admin",
-      email:    "admin@echoreview.ai",
+      name: "Admin",
+      email: adminEmail,
       password: "Admin@123",
-      role:     "admin",
+      role: "admin",
+      active: true,
     });
-    console.log("✓ Default admin created  →  admin@echoreview.ai / Admin@123");
+
+    console.log("✓ Default admin created → admin@echoreview.ai / Admin@123");
+  } else {
+    console.log("✓ Default admin already exists");
   }
 
   // Start analytics background worker
